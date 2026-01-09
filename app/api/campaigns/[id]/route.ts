@@ -103,13 +103,35 @@ export async function DELETE(
 
 /**
  * PATCH /api/campaigns/[id]
- * Toggle campaign status
+ * Partial update campaign (or toggle status if no body)
  */
 export async function PATCH(
     request: Request,
     { params }: { params: { id: string } }
 ) {
     try {
+        const contentType = request.headers.get('content-type');
+
+        // If there's a JSON body, do a partial update
+        if (contentType?.includes('application/json')) {
+            const body = await request.json();
+            const campaign = await updateCampaign(params.id, body);
+
+            if (!campaign) {
+                return NextResponse.json(
+                    { success: false, error: 'Campaign not found' },
+                    { status: 404 }
+                );
+            }
+
+            return NextResponse.json({
+                success: true,
+                data: campaign,
+                message: 'Campaign updated successfully',
+            });
+        }
+
+        // Otherwise, just toggle status (legacy behavior)
         const campaign = await toggleCampaignStatus(params.id);
 
         if (!campaign) {
@@ -125,9 +147,9 @@ export async function PATCH(
             message: `Campaign ${campaign.status === 'active' ? 'activated' : 'paused'}`,
         });
     } catch (error) {
-        console.error('Error toggling campaign status:', error);
+        console.error('Error updating campaign:', error);
         return NextResponse.json(
-            { success: false, error: 'Failed to toggle campaign status' },
+            { success: false, error: 'Failed to update campaign' },
             { status: 500 }
         );
     }
