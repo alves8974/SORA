@@ -1,11 +1,24 @@
 import { NextResponse, NextFetchEvent } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { detectFacebookBot, getRealIP } from './lib/detection';
+import { getRealIP } from './lib/detection';
 import { getCachedCampaign, getCampaign, getCampaignBySlug, cacheCampaign } from './lib/database';
-import { calculateDetectionProbability } from './lib/scoring-v2';
+import { detectLegitimateAdTraffic } from './lib/scoring-v2';
 import { logVisitToPostgres } from './lib/database-postgres';
 import { extractSlugFromPath } from './lib/slugs';
 import { getDomainByName } from './lib/database-domains';
+
+/**
+ * INVERTED CLOAKER LOGIC (v2.0)
+ * 
+ * DEFAULT: Show SAFE PAGE (protect the offer)
+ * EXCEPTION: Show OFFER PAGE only for legitimate Meta Ads traffic
+ * 
+ * Legitimate traffic is detected by:
+ * 1. Presence of fbclid parameter (Facebook Click ID)
+ * 2. NOT a known bot User-Agent
+ * 3. NOT from Ads Library referer
+ * 4. Organic Facebook referer (feed, stories, reels, etc.)
+ */
 
 export async function middleware(request: NextRequest, event: NextFetchEvent) {
     const { pathname } = request.nextUrl;
@@ -41,9 +54,6 @@ export async function middleware(request: NextRequest, event: NextFetchEvent) {
     }
 
     // Handle campaign routes: /slug or /c/[id] (legacy)
-    // NEW: Direct slug routing (e.g., /Kcj7xLm)
-    // LEGACY: /c/campaign-id pattern
-
     const slug = extractSlugFromPath(pathname);
 
     if (slug || pathname.startsWith('/c/')) {
@@ -54,13 +64,12 @@ export async function middleware(request: NextRequest, event: NextFetchEvent) {
             return NextResponse.next();
         }
 
-        // Get campaign (try slug first, then ID for backward compatibility)
+        // Get campaign
         let campaign = slug
             ? await getCampaignBySlug(identifier)
             : await getCachedCampaign(identifier) || await getCampaign(identifier);
 
         if (campaign && !slug) {
-            // Cache for faster lookup
             await cacheCampaign(campaign);
         }
 
@@ -68,30 +77,32 @@ export async function middleware(request: NextRequest, event: NextFetchEvent) {
             return NextResponse.next(); // Will trigger 404
         }
 
-        // Check if campaign is active
         if (campaign.status !== 'active') {
-            return NextResponse.next(); // Let page handle it
+            return NextResponse.next();
         }
 
         // Get request info
         const userAgent = request.headers.get('user-agent') || '';
         const ip = getRealIP(request.headers);
         const referer = request.headers.get('referer') || undefined;
+        const searchParams = request.nextUrl.searchParams;
 
-        // Advanced detection using NEW probabilistic scoring system
-        const detectionResult = calculateDetectionProbability(
+        // === INVERTED LOGIC ===
+        // Detect if this is LEGITIMATE AD TRAFFIC (the only case to show offer)
+        const detectionResult = detectLegitimateAdTraffic(
             userAgent,
             ip,
             request.headers,
+            searchParams,
             campaign.config
         );
 
-        // Determine which page to show
-        const shouldShowSafePage = detectionResult.isBot;
-        const targetPage = shouldShowSafePage ? 'safe' : 'real';
+        // INVERTED: isLegitimateAdTraffic = true means show OFFER
+        // Default (false) = show SAFE PAGE
+        const shouldShowOfferPage = detectionResult.isLegitimateAdTraffic;
+        const targetPage = shouldShowOfferPage ? 'real' : 'safe';
 
-        // CRITICAL FIX (Gemini): Log ASYNC without blocking user
-        // event.waitUntil ensures log completes but doesn't block response
+        // Log visit asynchronously
         event.waitUntil(
             logVisitToPostgres(
                 campaign.id,
@@ -105,19 +116,16 @@ export async function middleware(request: NextRequest, event: NextFetchEvent) {
         );
 
         // Get the appropriate page content
-        let pageUrl = shouldShowSafePage
-            ? (campaign.safePageUrl || '/safe')
-            : (campaign.realPageUrl || '/');
+        let pageUrl = shouldShowOfferPage
+            ? (campaign.realPageUrl || '/')
+            : (campaign.safePageUrl || '/safe');
 
         // UTM Pass-Through: Preserve tracking parameters
-        const searchParams = request.nextUrl.searchParams;
         if (searchParams.toString() && pageUrl.startsWith('http')) {
-            // Build URL with preserved UTM parameters
             const targetUrl = new URL(pageUrl);
             const hash = targetUrl.hash;
             targetUrl.hash = '';
 
-            // Copy all params
             searchParams.forEach((value, key) => {
                 if (!targetUrl.searchParams.has(key)) {
                     targetUrl.searchParams.set(key, value);
@@ -128,27 +136,17 @@ export async function middleware(request: NextRequest, event: NextFetchEvent) {
             pageUrl = targetUrl.toString();
         }
 
-        // If using external URLs, redirect
+        // Redirect or rewrite
         if (pageUrl.startsWith('http')) {
             return NextResponse.redirect(pageUrl);
         }
 
-        // Otherwise, rewrite to the target page (SSR, same URL)
         return NextResponse.rewrite(new URL(pageUrl, request.url));
     }
 
-    // Legacy routes (for backward compatibility)
+    // Legacy routes: Always show safe page by default
     if (pathname === '/' || pathname === '/safe') {
-        const userAgent = request.headers.get('user-agent') || '';
-        const ip = getRealIP(request.headers);
-        const referer = request.headers.get('referer') || undefined;
-
-        // Basic detection for legacy routes
-        const detection = detectFacebookBot(userAgent, ip, request.headers, referer);
-
-        if (pathname === '/' && detection.isBot) {
-            return NextResponse.rewrite(new URL('/safe', request.url));
-        }
+        return NextResponse.rewrite(new URL('/safe', request.url));
     }
 
     return NextResponse.next();

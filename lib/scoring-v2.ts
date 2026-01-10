@@ -1,10 +1,17 @@
 /**
- * NEW: Probabilistic Scoring System (v2.0)
- * Addresses ChatGPT + Gemini + Claude concerns:
- * - Normalized scores (0.0-1.0)
- * - Weighted probability calculation
- * - Detection modes (strict/balanced/permissive)
- * - ASN-based IP detection
+ * INVERTED Cloaker Scoring System (v2.1)
+ * 
+ * NEW LOGIC: SAFE PAGE is default. OFFER PAGE only for legitimate ad traffic.
+ * 
+ * This inverts the traditional cloaker approach:
+ * - Traditional: Detect bots → show safe page
+ * - Inverted: Detect legitimate ad clicks → show offer page
+ * 
+ * Legitimate Meta Ads traffic is identified by:
+ * 1. Presence of fbclid parameter (Facebook Click ID)
+ * 2. Absence of bot User-Agent patterns
+ * 3. NOT from Ads Library referer
+ * 4. Optional: Organic Facebook referer (feed, stories, reels)
  */
 
 import type {
@@ -15,6 +22,219 @@ import type {
     BehavioralData,
     IPQualityResult
 } from './types';
+
+/**
+ * Result type for inverted cloaker logic
+ */
+export interface LegitimateTrafficResult {
+    isLegitimateAdTraffic: boolean;  // true = show offer, false = show safe page
+    confidence: number;
+    reasons: string[];
+    redFlags: string[];
+    hasFbclid: boolean;
+    hasValidReferer: boolean;
+    isBot: boolean;  // Keep for logging compatibility
+    totalScore: number;
+    maxPossibleScore: number;
+    scores: DetectionResult['scores'];
+    userAgent: string;
+    ip: string;
+    timestamp: Date;
+}
+
+// Known bot User-Agents
+const BOT_USER_AGENTS = [
+    'facebookexternalhit',
+    'facebot',
+    'facebookcatalog',
+    'meta-externalagent',
+    'meta-externalfetcher',
+    'bot',
+    'crawler',
+    'spider',
+    'crawling',
+    'lighthouse',
+    'googlebot',
+    'bingbot',
+    'headless',
+    'phantom',
+    'selenium',
+    'puppeteer',
+    'playwright',
+];
+
+// Ads Library patterns (competitors/reviewers)
+const ADS_LIBRARY_PATTERNS = [
+    'facebook.com/ads/library',
+    'facebook.com/ads/archive',
+    'facebook.com/business/ads/library',
+    'facebook.com/ads/transparency',
+    'facebook.com/ads_library',
+    'facebook.com/adsmanager',
+    'business.facebook.com/ads',
+    'm.facebook.com/ads/library',
+    'm.facebook.com/ads',
+    'fb.com/ads/library',
+    'fb.com/ads',
+    'transparency.fb.com',
+    'transparency.meta.com',
+    'meta.com/transparency',
+    'ads.tiktok.com/business/creativecenter',
+    'library.tiktok.com',
+    'adstransparency.google.com',
+    'adlibrary',
+];
+
+// Valid organic Facebook referers (legitimate ad placements)
+const LEGITIMATE_FB_REFERERS = [
+    'facebook.com/posts',
+    'facebook.com/permalink',
+    'facebook.com/groups',
+    'facebook.com/events',
+    'facebook.com/marketplace',
+    'facebook.com/watch',
+    'facebook.com/stories',
+    'facebook.com/reel',
+    'facebook.com/feed',
+    'facebook.com/photo',
+    'facebook.com/video',
+    'fb.watch',
+    'instagram.com/p/',
+    'instagram.com/reel',
+    'instagram.com/stories',
+    'l.facebook.com',  // Facebook link shim
+    'lm.facebook.com', // Mobile link shim
+    'l.instagram.com', // Instagram link shim
+];
+
+/**
+ * MAIN FUNCTION: Detect if traffic is from legitimate Meta Ads
+ * 
+ * Returns isLegitimateAdTraffic = true ONLY if:
+ * 1. Has fbclid parameter (required)
+ * 2. NOT a bot User-Agent
+ * 3. NOT from Ads Library
+ */
+export function detectLegitimateAdTraffic(
+    userAgent: string,
+    ip: string,
+    headers: Headers,
+    searchParams: URLSearchParams,
+    config: CampaignConfig
+): LegitimateTrafficResult {
+    const reasons: string[] = [];
+    const redFlags: string[] = [];
+    const referer = headers.get('referer') || '';
+    const ua = userAgent.toLowerCase();
+    const refererLower = referer.toLowerCase();
+
+    // === CHECK 1: fbclid parameter (REQUIRED for offer page) ===
+    const fbclid = searchParams.get('fbclid');
+    const hasFbclid = !!fbclid && fbclid.length > 10;
+
+    if (hasFbclid) {
+        reasons.push(`✓ Has fbclid: ${fbclid.substring(0, 20)}...`);
+    } else {
+        redFlags.push('✗ No fbclid parameter - not from Meta Ads click');
+    }
+
+    // === CHECK 2: Bot User-Agent (BLOCKS offer page) ===
+    let isBot = false;
+    for (const botPattern of BOT_USER_AGENTS) {
+        if (ua.includes(botPattern)) {
+            isBot = true;
+            redFlags.push(`✗ Bot User-Agent detected: ${botPattern}`);
+            break;
+        }
+    }
+
+    if (!isBot) {
+        reasons.push('✓ Not a bot User-Agent');
+    }
+
+    // === CHECK 3: Ads Library referer (BLOCKS offer page) ===
+    let isFromAdsLibrary = false;
+    for (const pattern of ADS_LIBRARY_PATTERNS) {
+        if (refererLower.includes(pattern)) {
+            isFromAdsLibrary = true;
+            redFlags.push(`✗ Ads Library referer detected: ${pattern}`);
+            break;
+        }
+    }
+
+    if (!isFromAdsLibrary && referer) {
+        reasons.push('✓ Referer is not Ads Library');
+    }
+
+    // === CHECK 4: Valid Facebook referer (BONUS, not required) ===
+    let hasValidReferer = false;
+    for (const pattern of LEGITIMATE_FB_REFERERS) {
+        if (refererLower.includes(pattern)) {
+            hasValidReferer = true;
+            reasons.push(`✓ Valid Facebook referer: ${pattern}`);
+            break;
+        }
+    }
+
+    // === CHECK 5: Additional suspicious signals ===
+
+    // Facebook-specific headers (bots use these)
+    if (headers.get('x-fb-http-engine')) {
+        redFlags.push('✗ Facebook HTTP engine header (server-side bot)');
+        isBot = true;
+    }
+
+    // Preview requests
+    const purpose = headers.get('x-purpose') || headers.get('purpose');
+    if (purpose === 'preview') {
+        redFlags.push('✗ Preview request header');
+        isBot = true;
+    }
+
+    // Missing Accept-Language (common in bots)
+    if (!headers.get('accept-language')) {
+        redFlags.push('✗ Missing Accept-Language (suspicious)');
+    }
+
+    // Very short or empty User-Agent
+    if (!userAgent || userAgent.length < 20) {
+        redFlags.push('✗ Suspicious User-Agent (too short)');
+        isBot = true;
+    }
+
+    // === FINAL DECISION ===
+    // Show OFFER only if:
+    // 1. Has fbclid (required)
+    // 2. NOT a bot
+    // 3. NOT from Ads Library
+    const isLegitimateAdTraffic = hasFbclid && !isBot && !isFromAdsLibrary;
+
+    // Calculate confidence score
+    let confidence = 0;
+    if (hasFbclid) confidence += 40;
+    if (!isBot) confidence += 30;
+    if (!isFromAdsLibrary) confidence += 20;
+    if (hasValidReferer) confidence += 10;
+
+    // Reduce confidence for red flags
+    confidence = Math.max(0, confidence - (redFlags.length * 10));
+
+    return {
+        isLegitimateAdTraffic,
+        confidence,
+        reasons,
+        redFlags,
+        hasFbclid,
+        hasValidReferer,
+        isBot,
+        totalScore: isLegitimateAdTraffic ? 1.0 : 0.0,
+        maxPossibleScore: 1.0,
+        scores: {},
+        userAgent,
+        ip,
+        timestamp: new Date(),
+    };
+}
 
 /**
  * Normalize a score to 0.0-1.0 range

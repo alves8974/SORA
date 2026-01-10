@@ -5,6 +5,7 @@
 
 import { sql } from '@vercel/postgres';
 import type { DetectionResult, CampaignStats } from './types';
+import type { LegitimateTrafficResult } from './scoring-v2';
 
 /**
  * Simple hash function for IP anonymization (Edge Runtime compatible)
@@ -22,10 +23,11 @@ function hashIP(ip: string): string {
 /**
  * Log a visit to Postgres (not Redis)
  * Async, non-blocking
+ * Supports both old DetectionResult and new LegitimateTrafficResult
  */
 export async function logVisitToPostgres(
     campaignId: string,
-    detection: DetectionResult,
+    detection: DetectionResult | LegitimateTrafficResult,
     pageServed: 'safe' | 'real',
     metadata?: {
         referer?: string;
