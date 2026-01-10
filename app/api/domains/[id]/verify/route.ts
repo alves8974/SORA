@@ -22,22 +22,35 @@ export async function POST(
 
         // Add domain to Vercel project
         const vercelResult = await addDomainToVercel(domain.domain);
+        let error = vercelResult.error;
 
+        // If adding failed, we still check if it exists and verification status
+        // This handles cases where it might already exist or other non-critical errors
         if (!vercelResult.success) {
-            // Update status to failed
-            await updateDomain(params.id, { status: 'failed' });
-
-            return NextResponse.json(
-                {
-                    success: false,
-                    error: vercelResult.error || 'Failed to add domain to Vercel'
-                },
-                { status: 500 }
-            );
+            console.warn(`Failed to add domain ${domain.domain} to Vercel:`, vercelResult.error);
         }
 
-        // Check if already verified
-        const isVerified = vercelResult.data?.verified || false;
+        // Check verification status
+        let isVerified = vercelResult.data?.verified || false;
+
+        // If not verified from the add result (or add failed), check explicitly
+        if (!vercelResult.success || !isVerified) {
+            const check = await checkDomainVerification(domain.domain);
+
+            if (check.error) {
+                // If add failed AND check failed, then it's a real failure
+                if (!vercelResult.success) {
+                    await updateDomain(params.id, { status: 'failed' });
+                    return NextResponse.json(
+                        { success: false, error: vercelResult.error || check.error },
+                        { status: 500 }
+                    );
+                }
+                // If add succeeded but check failed, we trust the add result (unverified)
+            } else {
+                isVerified = check.verified;
+            }
+        }
 
         // Update domain status
         await updateDomain(params.id, {

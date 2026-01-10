@@ -75,9 +75,13 @@ export default function DomainsPage() {
 
             if (data.success) {
                 fetchDomains();
+            } else {
+                alert(data.error || 'Falha ao verificar domínio');
+                fetchDomains(); // Refresh to show 'failed' status if updated
             }
         } catch (err) {
             console.error('Verification error:', err);
+            alert('Erro ao conectar com o servidor');
         }
     }
 
