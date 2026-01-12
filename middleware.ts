@@ -6,6 +6,7 @@ import { detectLegitimateAdTraffic } from './lib/scoring-v2';
 import { logVisitToPostgres } from './lib/database-postgres';
 import { extractSlugFromPath } from './lib/slugs';
 import { getDomainByName } from './lib/database-domains';
+import { getOrCreateVisitorSession, shouldCountVisit, getVisitorCookieConfig } from './lib/visitor-session';
 
 /**
  * INVERTED CLOAKER LOGIC (v2.0)
@@ -102,7 +103,12 @@ export async function middleware(request: NextRequest, event: NextFetchEvent) {
         const shouldShowOfferPage = detectionResult.isLegitimateAdTraffic;
         const targetPage = shouldShowOfferPage ? 'real' : 'safe';
 
-        // Log visit asynchronously
+        // === VISITOR DEDUPLICATION ===
+        // Get or create visitor session to prevent counting duplicates
+        const visitorSession = getOrCreateVisitorSession(request, ip, userAgent);
+        const isNewVisit = shouldCountVisit(visitorSession, campaign.id);
+
+        // Log visit asynchronously (only if not a duplicate)
         event.waitUntil(
             logVisitToPostgres(
                 campaign.id,
@@ -110,7 +116,8 @@ export async function middleware(request: NextRequest, event: NextFetchEvent) {
                 targetPage,
                 {
                     referer,
-                    anonymizeIP: campaign.config.anonymizeIPs
+                    anonymizeIP: campaign.config.anonymizeIPs,
+                    isNewVisit  // Only count if this is a new visit
                 }
             )
         );
@@ -136,12 +143,30 @@ export async function middleware(request: NextRequest, event: NextFetchEvent) {
             pageUrl = targetUrl.toString();
         }
 
-        // Redirect or rewrite
+        // Redirect or rewrite (with visitor cookie)
+        const cookieConfig = getVisitorCookieConfig();
+
         if (pageUrl.startsWith('http')) {
-            return NextResponse.redirect(pageUrl);
+            const response = NextResponse.redirect(pageUrl);
+            response.cookies.set(cookieConfig.name, visitorSession.visitorId, {
+                maxAge: cookieConfig.maxAge,
+                httpOnly: cookieConfig.httpOnly,
+                secure: cookieConfig.secure,
+                sameSite: cookieConfig.sameSite,
+                path: cookieConfig.path
+            });
+            return response;
         }
 
-        return NextResponse.rewrite(new URL(pageUrl, request.url));
+        const response = NextResponse.rewrite(new URL(pageUrl, request.url));
+        response.cookies.set(cookieConfig.name, visitorSession.visitorId, {
+            maxAge: cookieConfig.maxAge,
+            httpOnly: cookieConfig.httpOnly,
+            secure: cookieConfig.secure,
+            sameSite: cookieConfig.sameSite,
+            path: cookieConfig.path
+        });
+        return response;
     }
 
     // Legacy routes: Always show safe page by default

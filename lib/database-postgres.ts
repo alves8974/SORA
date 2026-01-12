@@ -33,9 +33,16 @@ export async function logVisitToPostgres(
         referer?: string;
         country?: string;
         anonymizeIP?: boolean;
+        isNewVisit?: boolean;  // If false, skip logging (duplicate visit)
     }
 ): Promise<void> {
     try {
+        // Skip logging if this is a duplicate visit (deduplication)
+        if (metadata?.isNewVisit === false) {
+            console.log(`[Dedup] Skipping duplicate visit for campaign ${campaignId}`);
+            return;
+        }
+
         const ipHash = metadata?.anonymizeIP !== false
             ? hashIP(detection.ip)
             : detection.ip;
@@ -195,9 +202,6 @@ export async function getGlobalStats(): Promise<any> {
     }
 }
 
-/**
- * Log click event to Postgres
- */
 export async function logClickToPostgres(
     visitId: string,
     url?: string,
@@ -211,5 +215,116 @@ export async function logClickToPostgres(
     } catch (error) {
         console.error('Error logging click to Postgres:', error);
         // Don't throw - click tracking should never break the page
+    }
+}
+
+/**
+ * Visit log interface for API responses
+ */
+export interface VisitLogEntry {
+    id: string;
+    campaignId: string;
+    timestamp: string;
+    ipHash: string;
+    userAgent: string;
+    referer: string | null;
+    country: string | null;
+    isBot: boolean;
+    confidence: number;
+    probability: number;
+    pageServed: 'safe' | 'real';
+    detectionDetails: any;
+}
+
+/**
+ * Get recent logs from Postgres (for Logs page)
+ * Fetches the most recent visit logs across all campaigns
+ */
+export async function getRecentLogsFromPostgres(limit: number = 100): Promise<VisitLogEntry[]> {
+    try {
+        const result = await sql`
+            SELECT 
+                id,
+                campaign_id,
+                visited_at,
+                ip_hash,
+                user_agent,
+                referer,
+                country,
+                is_bot,
+                confidence,
+                probability,
+                page_served,
+                detection_details
+            FROM visit_logs
+            ORDER BY visited_at DESC
+            LIMIT ${limit}
+        `;
+
+        return result.rows.map(row => ({
+            id: row.id?.toString() || '',
+            campaignId: row.campaign_id,
+            timestamp: row.visited_at?.toISOString() || new Date().toISOString(),
+            ipHash: row.ip_hash,
+            userAgent: row.user_agent || '',
+            referer: row.referer,
+            country: row.country,
+            isBot: row.is_bot,
+            confidence: parseFloat(row.confidence) || 0,
+            probability: parseFloat(row.probability) || 0,
+            pageServed: row.page_served,
+            detectionDetails: row.detection_details || {}
+        }));
+    } catch (error) {
+        console.error('Error fetching logs from Postgres:', error);
+        return [];
+    }
+}
+
+/**
+ * Get logs for a specific campaign
+ */
+export async function getCampaignLogsFromPostgres(
+    campaignId: string,
+    limit: number = 100
+): Promise<VisitLogEntry[]> {
+    try {
+        const result = await sql`
+            SELECT 
+                id,
+                campaign_id,
+                visited_at,
+                ip_hash,
+                user_agent,
+                referer,
+                country,
+                is_bot,
+                confidence,
+                probability,
+                page_served,
+                detection_details
+            FROM visit_logs
+            WHERE campaign_id = ${campaignId}
+            ORDER BY visited_at DESC
+            LIMIT ${limit}
+        `;
+
+        return result.rows.map(row => ({
+            id: row.id?.toString() || '',
+            campaignId: row.campaign_id,
+            timestamp: row.visited_at?.toISOString() || new Date().toISOString(),
+            ipHash: row.ip_hash,
+            userAgent: row.user_agent || '',
+            referer: row.referer,
+            country: row.country,
+            isBot: row.is_bot,
+            confidence: parseFloat(row.confidence) || 0,
+            probability: parseFloat(row.probability) || 0,
+            pageServed: row.page_served,
+            detectionDetails: row.detection_details || {}
+        }));
+    } catch (error) {
+        console.error('Error fetching campaign logs from Postgres:', error);
+        return [];
     }
 }

@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getRecentLogs } from '@/lib/database';
+import { getRecentLogsFromPostgres } from '@/lib/database-postgres';
 
 // Force dynamic rendering
 export const dynamic = 'force-dynamic';
@@ -9,7 +9,7 @@ export async function GET(request: Request) {
         const { searchParams } = new URL(request.url);
         const limit = parseInt(searchParams.get('limit') || '100');
 
-        const logs = await getRecentLogs(limit);
+        const logs = await getRecentLogsFromPostgres(limit);
         return NextResponse.json(logs);
     } catch (error) {
         console.error('Error fetching logs:', error);
