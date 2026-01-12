@@ -54,7 +54,7 @@ export default function DomainsPage() {
             if (data.success) {
                 setDomains([data.data, ...domains]);
                 setNewDomain('');
-                await handleVerify(data.data.id);
+                // Domain starts as 'pending' - user must click "Verificar" manually
             } else {
                 setError(data.error || 'Failed to add domain');
             }

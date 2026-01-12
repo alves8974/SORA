@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { getDefaultConfig } from '@/lib/scoring';
 import type { CampaignConfig } from '@/lib/types';
@@ -94,6 +94,8 @@ export default function NewCampaignPage() {
     const [formData, setFormData] = useState({
         name: '',
         description: '',
+        selectedDomainId: '',
+        selectedDomain: '',
         trafficSource: 'meta' as 'meta' | 'google' | 'tiktok' | 'general',
         method: 'redirect' as 'mirror' | 'redirect' | 'prepage',
         trackClicks: true,
@@ -103,6 +105,22 @@ export default function NewCampaignPage() {
         realPageHtml: '',
         config: getDefaultConfig(),
     });
+
+    // Verified domains for selection
+    const [verifiedDomains, setVerifiedDomains] = useState<Array<{ id: string; domain: string; status: string }>>([]);
+
+    // Fetch verified domains on mount
+    useEffect(() => {
+        fetch('/api/domains')
+            .then(res => res.json())
+            .then(data => {
+                if (data.success && Array.isArray(data.data)) {
+                    const active = data.data.filter((d: any) => d.status === 'active');
+                    setVerifiedDomains(active);
+                }
+            })
+            .catch(err => console.error('Error fetching domains:', err));
+    }, []);
 
     const handleSubmit = async () => {
         setLoading(true);
@@ -163,10 +181,10 @@ export default function NewCampaignPage() {
                                 <div className="flex flex-col items-center">
                                     <div
                                         className={`w-10 h-10 rounded-full flex items-center justify-center font-semibold transition-all ${s < step
-                                                ? 'bg-green-500 text-white'
-                                                : s === step
-                                                    ? 'bg-gradient-to-br from-blue-500 to-cyan-500 text-white shadow-lg shadow-blue-500/30'
-                                                    : 'bg-gray-700 text-gray-400'
+                                            ? 'bg-green-500 text-white'
+                                            : s === step
+                                                ? 'bg-gradient-to-br from-blue-500 to-cyan-500 text-white shadow-lg shadow-blue-500/30'
+                                                : 'bg-gray-700 text-gray-400'
                                             }`}
                                     >
                                         {s < step ? <CheckCircle className="w-5 h-5" /> : s}
@@ -189,7 +207,11 @@ export default function NewCampaignPage() {
             {/* Step Content */}
             <div className="bg-gray-800/50 backdrop-blur border border-gray-700/50 rounded-xl p-6">
                 {step === 1 && (
-                    <Step1Configuration formData={formData} setFormData={setFormData} />
+                    <Step1Configuration
+                        formData={formData}
+                        setFormData={setFormData}
+                        verifiedDomains={verifiedDomains}
+                    />
                 )}
                 {step === 2 && (
                     <Step2SafePage formData={formData} setFormData={setFormData} />
@@ -253,13 +275,13 @@ export default function NewCampaignPage() {
 function SuccessPage({ campaign, onGoToCampaigns }: { campaign: any; onGoToCampaigns: () => void }) {
     const [copied, setCopied] = useState<string | null>(null);
 
-    const baseUrl = typeof window !== 'undefined'
-        ? `${window.location.protocol}//${window.location.host}`
-        : 'https://sora-eta-kohl.vercel.app';
+    // Use the selected domain if available, otherwise fall back to current host
+    const baseUrl = campaign.selectedDomain
+        ? `https://${campaign.selectedDomain}`
+        : (typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.host}` : '');
 
     const campaignUrl = `${baseUrl}/${campaign.slug}`;
     const utmParams = META_ADS_UTM_TEMPLATE;
-    const fullUrl = `${campaignUrl}?${utmParams}&xid=${campaign.slug}`;
 
     const copyToClipboard = (text: string, id: string) => {
         navigator.clipboard.writeText(text);
@@ -287,10 +309,20 @@ function SuccessPage({ campaign, onGoToCampaigns }: { campaign: any; onGoToCampa
                     <h2 className="text-xl font-bold text-white">URL da Campanha</h2>
                 </div>
 
-                {/* Simple URL */}
+                {/* Domain Info */}
+                {campaign.selectedDomain && (
+                    <div className="p-3 bg-green-900/20 border border-green-700/50 rounded-lg">
+                        <p className="text-green-300 text-sm flex items-center gap-2">
+                            <CheckCircle className="w-4 h-4" />
+                            Usando domínio verificado: <strong>{campaign.selectedDomain}</strong>
+                        </p>
+                    </div>
+                )}
+
+                {/* Base URL */}
                 <div className="space-y-2">
                     <label className="block text-sm font-medium text-gray-400">
-                        URL Base (para testes)
+                        🔗 URL Base
                     </label>
                     <div className="flex items-center gap-2">
                         <input
@@ -302,8 +334,8 @@ function SuccessPage({ campaign, onGoToCampaigns }: { campaign: any; onGoToCampa
                         <button
                             onClick={() => copyToClipboard(campaignUrl, 'base')}
                             className={`px-4 py-3 rounded-lg font-medium transition-colors flex items-center gap-2 ${copied === 'base'
-                                    ? 'bg-green-500 text-white'
-                                    : 'bg-blue-600 hover:bg-blue-500 text-white'
+                                ? 'bg-green-500 text-white'
+                                : 'bg-blue-600 hover:bg-blue-500 text-white'
                                 }`}
                         >
                             {copied === 'base' ? <CheckCircle className="w-4 h-4" /> : <CopyIcon className="w-4 h-4" />}
@@ -319,40 +351,25 @@ function SuccessPage({ campaign, onGoToCampaigns }: { campaign: any; onGoToCampa
                     </label>
                     <div className="p-4 bg-purple-900/30 border border-purple-700/50 rounded-lg">
                         <code className="text-purple-300 text-sm break-all">
-                            {utmParams}&xid={campaign.slug}
+                            ?{utmParams}&xid={campaign.slug}
                         </code>
                     </div>
                     <button
-                        onClick={() => copyToClipboard(`${utmParams}&xid=${campaign.slug}`, 'params')}
+                        onClick={() => copyToClipboard(`?${utmParams}&xid=${campaign.slug}`, 'params')}
                         className={`w-full px-4 py-2 rounded-lg font-medium transition-colors ${copied === 'params'
-                                ? 'bg-green-500 text-white'
-                                : 'bg-gray-700 hover:bg-gray-600 text-white'
+                            ? 'bg-green-500 text-white'
+                            : 'bg-gray-700 hover:bg-gray-600 text-white'
                             }`}
                     >
                         {copied === 'params' ? '✓ Copiado!' : 'Copiar Parâmetros'}
                     </button>
                 </div>
 
-                {/* Full URL */}
-                <div className="space-y-2">
-                    <label className="block text-sm font-medium text-gray-400">
-                        🚀 URL Completa (para usar no anúncio)
-                    </label>
-                    <div className="p-4 bg-gray-900/50 border border-gray-600 rounded-lg overflow-x-auto">
-                        <code className="text-green-400 text-sm break-all">
-                            {fullUrl}
-                        </code>
-                    </div>
-                    <button
-                        onClick={() => copyToClipboard(fullUrl, 'full')}
-                        className={`w-full px-4 py-3 rounded-lg font-semibold transition-colors flex items-center justify-center gap-2 ${copied === 'full'
-                                ? 'bg-green-500 text-white'
-                                : 'bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-white'
-                            }`}
-                    >
-                        {copied === 'full' ? <CheckCircle className="w-5 h-5" /> : <CopyIcon className="w-5 h-5" />}
-                        {copied === 'full' ? 'Copiado!' : 'Copiar URL Completa'}
-                    </button>
+                {/* Instructions */}
+                <div className="p-4 bg-blue-900/20 border border-blue-700/50 rounded-lg">
+                    <p className="text-blue-300 text-sm">
+                        💡 <strong>Como usar:</strong> Copie a URL Base e adicione os Parâmetros no campo de URL do seu anúncio no Meta Ads.
+                    </p>
                 </div>
             </div>
 
@@ -409,7 +426,7 @@ function SuccessPage({ campaign, onGoToCampaigns }: { campaign: any; onGoToCampa
 }
 
 // ==================== STEP 1: Configuration ====================
-function Step1Configuration({ formData, setFormData }: any) {
+function Step1Configuration({ formData, setFormData, verifiedDomains }: any) {
     return (
         <div className="space-y-8">
             <div>
@@ -444,6 +461,46 @@ function Step1Configuration({ formData, setFormData }: any) {
                         placeholder="Para que serve esta campanha?"
                     />
                 </div>
+
+                {/* Domain Selector */}
+                <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-2">
+                        Domínio da Campanha *
+                    </label>
+                    {verifiedDomains.length > 0 ? (
+                        <select
+                            value={formData.selectedDomainId}
+                            onChange={(e) => {
+                                const domain = verifiedDomains.find((d: any) => d.id === e.target.value);
+                                setFormData({
+                                    ...formData,
+                                    selectedDomainId: e.target.value,
+                                    selectedDomain: domain?.domain || ''
+                                });
+                            }}
+                            className="w-full px-4 py-3 bg-gray-900/50 border border-gray-600 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                        >
+                            <option value="">Selecione um domínio verificado</option>
+                            {verifiedDomains.map((d: any) => (
+                                <option key={d.id} value={d.id}>
+                                    {d.domain}
+                                </option>
+                            ))}
+                        </select>
+                    ) : (
+                        <div className="p-4 bg-yellow-900/20 border border-yellow-700/50 rounded-lg">
+                            <p className="text-yellow-300 text-sm">
+                                Nenhum domínio verificado encontrado.
+                                <a href="/admin/domains" className="underline ml-1 text-yellow-200">
+                                    Adicione e verifique um domínio primeiro
+                                </a>
+                            </p>
+                        </div>
+                    )}
+                    <p className="text-sm text-gray-500 mt-2">
+                        A URL da campanha será gerada com este domínio
+                    </p>
+                </div>
             </div>
 
             {/* Traffic Source Selector */}
@@ -460,8 +517,8 @@ function Step1Configuration({ formData, setFormData }: any) {
                                 type="button"
                                 onClick={() => setFormData({ ...formData, trafficSource: source.id })}
                                 className={`p-4 rounded-xl border-2 text-left transition-all ${formData.trafficSource === source.id
-                                        ? 'border-blue-500 bg-blue-500/10'
-                                        : 'border-gray-700 hover:border-gray-600 bg-gray-900/30'
+                                    ? 'border-blue-500 bg-blue-500/10'
+                                    : 'border-gray-700 hover:border-gray-600 bg-gray-900/30'
                                     }`}
                             >
                                 <div className={`w-10 h-10 rounded-lg bg-gradient-to-br ${source.gradient} flex items-center justify-center mb-3`}>
@@ -489,8 +546,8 @@ function Step1Configuration({ formData, setFormData }: any) {
                                 type="button"
                                 onClick={() => setFormData({ ...formData, method: method.id })}
                                 className={`p-4 rounded-xl border-2 text-left transition-all relative ${formData.method === method.id
-                                        ? 'border-blue-500 bg-blue-500/10'
-                                        : 'border-gray-700 hover:border-gray-600 bg-gray-900/30'
+                                    ? 'border-blue-500 bg-blue-500/10'
+                                    : 'border-gray-700 hover:border-gray-600 bg-gray-900/30'
                                     }`}
                             >
                                 {method.recommended && (
@@ -775,7 +832,8 @@ function Step4Detection({ formData, setFormData }: any) {
 function isStepValid(step: number, formData: any): boolean {
     switch (step) {
         case 1:
-            return formData.name.length > 0;
+            // Require name and domain selection
+            return formData.name.length > 0 && formData.selectedDomainId.length > 0;
         default:
             return true;
     }
