@@ -23,6 +23,8 @@ import type {
     IPQualityResult
 } from './types';
 
+import { detectSpyTool } from './spy-detection';
+
 /**
  * Result type for inverted cloaker logic
  */
@@ -128,6 +130,15 @@ export function detectLegitimateAdTraffic(
     const ua = userAgent.toLowerCase();
     const refererLower = referer.toLowerCase();
 
+    // === CHECK 0: Spy Tool Detection (datacenter IPs + headless browsers) ===
+    const spyCheck = detectSpyTool(ip, userAgent, headers);
+    let isSpyTool = false;
+    if (spyCheck.isSpyTool) {
+        isSpyTool = true;
+        redFlags.push(`✗ Spy tool detected (${spyCheck.confidence} confidence)`);
+        spyCheck.reasons.forEach(r => redFlags.push(`  - ${r}`));
+    }
+
     // === CHECK 1: fbclid parameter (REQUIRED for offer page) ===
     const fbclid = searchParams.get('fbclid');
     const hasFbclid = !!fbclid && fbclid.length > 10;
@@ -207,7 +218,8 @@ export function detectLegitimateAdTraffic(
     // 1. Has fbclid (required)
     // 2. NOT a bot
     // 3. NOT from Ads Library
-    const isLegitimateAdTraffic = hasFbclid && !isBot && !isFromAdsLibrary;
+    // 4. NOT a spy tool (datacenter IP or headless browser)
+    const isLegitimateAdTraffic = hasFbclid && !isBot && !isFromAdsLibrary && !isSpyTool;
 
     // Calculate confidence score
     let confidence = 0;
