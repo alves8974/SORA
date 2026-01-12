@@ -7,18 +7,24 @@ import { logVisitToPostgres } from './lib/database-postgres';
 import { extractSlugFromPath } from './lib/slugs';
 import { getDomainByName } from './lib/database-domains';
 import { getOrCreateVisitorSession, shouldCountVisit, getVisitorCookieConfig } from './lib/visitor-session';
+import { createOfferToken } from './lib/token-crypto';
 
 /**
- * INVERTED CLOAKER LOGIC (v2.0)
+ * INVERTED CLOAKER LOGIC (v2.1) - WITH TOKEN PROTECTION
  * 
  * DEFAULT: Show SAFE PAGE (protect the offer)
  * EXCEPTION: Show OFFER PAGE only for legitimate Meta Ads traffic
  * 
- * Legitimate traffic is detected by:
- * 1. Presence of fbclid parameter (Facebook Click ID)
- * 2. NOT a known bot User-Agent
- * 3. NOT from Ads Library referer
- * 4. Organic Facebook referer (feed, stories, reels, etc.)
+ * NEW: Uses encrypted tokens to prevent URL exposure in:
+ * - HTML source code
+ * - Browser DevTools
+ * - Network inspection
+ * 
+ * Flow:
+ * 1. Detect legitimate traffic
+ * 2. If legitimate → create encrypted token → redirect to /prepage?t=[token]
+ * 3. Prepage validates token → redirects to offer
+ * 4. If not legitimate → show safe page directly
  */
 
 export async function middleware(request: NextRequest, event: NextFetchEvent) {
@@ -32,6 +38,7 @@ export async function middleware(request: NextRequest, event: NextFetchEvent) {
         pathname.startsWith('/_next') ||
         pathname.startsWith('/api') ||
         pathname.startsWith('/admin') ||
+        pathname.startsWith('/prepage') || // Allow prepage to load
         pathname.includes('.') // static files
     ) {
         return NextResponse.next();
@@ -122,32 +129,38 @@ export async function middleware(request: NextRequest, event: NextFetchEvent) {
             )
         );
 
-        // Get the appropriate page content
-        let pageUrl = shouldShowOfferPage
-            ? (campaign.realPageUrl || '/')
-            : (campaign.safePageUrl || '/safe');
-
-        // UTM Pass-Through: Preserve tracking parameters
-        if (searchParams.toString() && pageUrl.startsWith('http')) {
-            const targetUrl = new URL(pageUrl);
-            const hash = targetUrl.hash;
-            targetUrl.hash = '';
-
-            searchParams.forEach((value, key) => {
-                if (!targetUrl.searchParams.has(key)) {
-                    targetUrl.searchParams.set(key, value);
-                }
-            });
-
-            if (hash) targetUrl.hash = hash;
-            pageUrl = targetUrl.toString();
-        }
-
-        // Redirect or rewrite (with visitor cookie)
+        // Get cookie config for visitor tracking
         const cookieConfig = getVisitorCookieConfig();
 
-        if (pageUrl.startsWith('http')) {
-            const response = NextResponse.redirect(pageUrl);
+        // === TOKEN-PROTECTED REDIRECT FOR OFFERS ===
+        if (shouldShowOfferPage) {
+            const offerUrl = campaign.realPageUrl || '/';
+
+            // Build offer URL with UTM parameters
+            let finalOfferUrl = offerUrl;
+            if (searchParams.toString() && offerUrl.startsWith('http')) {
+                const targetUrl = new URL(offerUrl);
+                const hash = targetUrl.hash;
+                targetUrl.hash = '';
+
+                searchParams.forEach((value, key) => {
+                    if (!targetUrl.searchParams.has(key)) {
+                        targetUrl.searchParams.set(key, value);
+                    }
+                });
+
+                if (hash) targetUrl.hash = hash;
+                finalOfferUrl = targetUrl.toString();
+            }
+
+            // Create encrypted token (expires in 60 seconds)
+            const token = createOfferToken(finalOfferUrl, campaign.id, 60);
+
+            // Redirect to prepage with token
+            const prepageUrl = new URL('/prepage', request.url);
+            prepageUrl.searchParams.set('t', token);
+
+            const response = NextResponse.redirect(prepageUrl.toString());
             response.cookies.set(cookieConfig.name, visitorSession.visitorId, {
                 maxAge: cookieConfig.maxAge,
                 httpOnly: cookieConfig.httpOnly,
@@ -158,7 +171,24 @@ export async function middleware(request: NextRequest, event: NextFetchEvent) {
             return response;
         }
 
-        const response = NextResponse.rewrite(new URL(pageUrl, request.url));
+        // === SAFE PAGE (default) ===
+        let safePageUrl = campaign.safePageUrl || '/safe';
+
+        // For external safe pages, redirect
+        if (safePageUrl.startsWith('http')) {
+            const response = NextResponse.redirect(safePageUrl);
+            response.cookies.set(cookieConfig.name, visitorSession.visitorId, {
+                maxAge: cookieConfig.maxAge,
+                httpOnly: cookieConfig.httpOnly,
+                secure: cookieConfig.secure,
+                sameSite: cookieConfig.sameSite,
+                path: cookieConfig.path
+            });
+            return response;
+        }
+
+        // For internal safe pages, rewrite
+        const response = NextResponse.rewrite(new URL(safePageUrl, request.url));
         response.cookies.set(cookieConfig.name, visitorSession.visitorId, {
             maxAge: cookieConfig.maxAge,
             httpOnly: cookieConfig.httpOnly,
@@ -182,3 +212,4 @@ export const config = {
         '/((?!api|_next/static|_next/image|favicon.ico).*)',
     ],
 };
+
